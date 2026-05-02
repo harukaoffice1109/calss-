@@ -5,8 +5,8 @@ from typing import Any
 import streamlit as st
 
 from ai_client import get_secret
-from pdf_utils import extract_pdf_text
-from prompts import analyze_block, emergency_followup, identify_structure
+from pdf_utils import extract_pdf_text, pdf_to_page_images
+from prompts import analyze_block, emergency_followup, identify_structure, ocr_images_to_text
 from storage import block_label, build_analysis_package, load_package, package_to_bytes, question_label
 
 st.set_page_config(page_title="高考日语课堂小助手", page_icon="📘", layout="wide")
@@ -137,6 +137,7 @@ def init_state() -> None:
         "answer_text": "",
         "analysis_pkg": None,
         "selected_item": None,
+        "ocr_mode": "api",
     }
     for key, value in defaults.items():
         st.session_state.setdefault(key, value)
@@ -154,7 +155,7 @@ tab_create, tab_class, tab_help = st.tabs(["① 创建解析包", "② 课堂模
 
 with tab_create:
     st.subheader("创建解析包")
-    st.write("先上传试卷 PDF 和答案 PDF，系统会识别非听力、非作文部分，再按题块预处理。")
+    st.write("先上传试卷 PDF 和答案 PDF。推荐使用 API OCR：直接把 PDF 页面转成图片交给模型识别，扫描版也更稳。")
 
     col1, col2 = st.columns(2)
     with col1:
@@ -162,18 +163,39 @@ with tab_create:
     with col2:
         answer_pdf = st.file_uploader("答案 PDF", type=["pdf"], key="answer_pdf")
 
+    ocr_mode = st.radio(
+        "文本识别方式",
+        options=["api", "local"],
+        format_func=lambda x: "API OCR / 视觉识别（推荐，适合扫描PDF）" if x == "api" else "本地提取文字层（快，但扫描PDF容易失败）",
+        horizontal=False,
+        key="ocr_mode",
+    )
+    max_pages = st.number_input("最多识别页数（防止误传超大文件）", min_value=1, max_value=50, value=20, step=1)
+
     c1, c2 = st.columns(2)
     with c1:
-        if st.button("提取文本", use_container_width=True, disabled=not exam_pdf):
-            with st.spinner("正在提取 PDF 文本……"):
-                exam = extract_pdf_text(exam_pdf)
-                st.session_state.exam_text = exam.text
-                if answer_pdf:
-                    ans = extract_pdf_text(answer_pdf)
-                    st.session_state.answer_text = ans.text
+        if st.button("提取/识别文本", use_container_width=True, disabled=not exam_pdf):
+            with st.spinner("正在识别 PDF 文本……"):
+                if ocr_mode == "api":
+                    exam_images = pdf_to_page_images(exam_pdf, max_pages=int(max_pages))
+                    st.session_state.exam_text = ocr_images_to_text(exam_images, label="试卷")
+                    if answer_pdf:
+                        answer_images = pdf_to_page_images(answer_pdf, max_pages=int(max_pages))
+                        st.session_state.answer_text = ocr_images_to_text(answer_images, label="答案")
+                    else:
+                        st.session_state.answer_text = ""
                 else:
-                    st.session_state.answer_text = ""
-            st.success("文本提取完成")
+                    exam = extract_pdf_text(exam_pdf)
+                    st.session_state.exam_text = exam.text
+                    if answer_pdf:
+                        ans = extract_pdf_text(answer_pdf)
+                        st.session_state.answer_text = ans.text
+                    else:
+                        st.session_state.answer_text = ""
+            if len(st.session_state.exam_text.strip()) < 200:
+                st.warning("识别到的试卷文本很短，可能识别失败。建议切换到 API OCR。")
+            else:
+                st.success("文本识别完成")
     with c2:
         if st.button("识别试卷结构", use_container_width=True, disabled=not st.session_state.exam_text):
             with st.spinner("正在识别知识运用和阅读理解题块……"):
@@ -254,7 +276,7 @@ with tab_class:
 
 with tab_help:
     st.subheader("临时追问")
-    st.caption("课堂上如果学生问了缓存里没有的问题，可以临时调用 API。平时不需要用。")
+    st.caption("课堂上如果学生问了缓存里没有的问题，可以临时调用 API。默认不需要用；主要内容都应在课前解析包里。")
     pkg = st.session_state.analysis_pkg
     if not pkg:
         st.info("先加载解析包，追问回答会更准确。")

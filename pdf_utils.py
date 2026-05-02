@@ -29,6 +29,21 @@ def extract_pdf_text(uploaded_file) -> ExtractedPdf:
     return ExtractedPdf(filename=uploaded_file.name, text=full_text, pages=pages)
 
 
+def pdf_to_page_images(uploaded_file, *, max_pages: int | None = None, dpi: int = 160) -> list[bytes]:
+    """Render PDF pages to PNG bytes for API OCR/vision recognition."""
+    raw = uploaded_file.getvalue()
+    doc = fitz.open(stream=raw, filetype="pdf")
+    zoom = dpi / 72
+    matrix = fitz.Matrix(zoom, zoom)
+    images: list[bytes] = []
+    total = len(doc) if max_pages is None else min(len(doc), max_pages)
+    for idx in range(total):
+        page = doc[idx]
+        pix = page.get_pixmap(matrix=matrix, alpha=False)
+        images.append(pix.tobytes("png"))
+    return images
+
+
 def normalize_text(text: str) -> str:
     text = text.replace("\u3000", " ")
     text = re.sub(r"[ \t]+", " ", text)
@@ -37,7 +52,6 @@ def normalize_text(text: str) -> str:
 
 
 def split_japanese_sentences(text: str) -> list[str]:
-    """Fallback Japanese sentence splitter used when AI output misses sentence splits."""
     cleaned = re.sub(r"\s+", " ", text).strip()
     if not cleaned:
         return []
@@ -50,7 +64,6 @@ def stable_id(prefix: str) -> str:
 
 
 def extract_json_from_text(text: str) -> Any:
-    """Robustly parse JSON from model output, including fenced code blocks."""
     text = text.strip()
     if text.startswith("```"):
         text = re.sub(r"^```(?:json)?", "", text).strip()
